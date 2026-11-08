@@ -1,4 +1,5 @@
 import threading
+from zoneinfo import ZoneInfo
 import os
 from dotenv import load_dotenv
 import asyncio
@@ -127,7 +128,7 @@ class HoneyHarvestView(discord.ui.View):
         button.label = "🐝 꿀 모으는 중..."
 
         # datetime 라이브러리로 현재 수확 완료된 시각 기록
-        now = datetime.now()
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
         finish_time = now + timedelta(minutes=15)
         time_str = finish_time.strftime('%H시 %M분')
 
@@ -183,7 +184,7 @@ async def start_timer(interaction: discord.Interaction):
         await interaction.response.send_message("⚠️ 먼저 `/채널설정` 명령어로 꿀 알림을 받을 채널을 선택해 주세요.", ephemeral=True)
         return
 
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
     finish_time = now + timedelta(minutes=15)
     time_str = finish_time.strftime('%H시 %M분')
 
