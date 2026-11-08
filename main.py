@@ -59,7 +59,7 @@ async def schedule_next_harvest():
 
     # 15분 대기 (15분 = 900초)
     # 테스트하고 싶으실 때는 900 대신 10초(10) 등으로 줄여서 테스트해 보실 수 있습니다!
-    await asyncio.sleep(10)
+    await asyncio.sleep(900)
 
     if target_channel_id is None:
         return
@@ -92,7 +92,7 @@ async def schedule_next_harvest():
             ),
             color=0xFFD700
         )
-        embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/2913/2913502.png")
+        embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3413/3413307.png")
         embed.set_footer(text="🐝 수확을 기다리는 중...")
 
         current_embed_message = await channel.send(embed=embed, view=HoneyHarvestView())
