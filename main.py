@@ -1,13 +1,14 @@
 import threading
-from zoneinfo import ZoneInfo
-import os
-from dotenv import load_dotenv
 import asyncio
+import json
+import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from flask import Flask
 import discord
 from discord import app_commands
 from discord.ext import commands
+from dotenv import load_dotenv
 
 load_dotenv() # .env 파일 읽기
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
@@ -45,43 +46,79 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# 설정 및 상태 관리 변수
-target_channel_id = None
-target_role_id = None          # None이면 @everyone
-current_mention_message = None # 🔔 멘션 알림 메시지 객체
-current_embed_message = None   # 🐝 임베드 메시지 객체
-timer_task = None              # 현재 진행 중인 대기 작업(Task)
+# ---------------------------------------------------------
+# 💾 서버 설정 파일 관리 (JSON 영구 저장)
+# ---------------------------------------------------------
+CONFIG_FILE = "server_config.json"
+
+def load_configs():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_configs(data):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"설정 저장 중 에러 발생: {e}")
+
+# 전체 서버 설정 데이터 로드 (형식: { "guild_id": { "channel_id": ..., "role_id": ... } })
+saved_configs = load_configs()
 
 # ---------------------------------------------------------
-# 🐝 15분 뒤 알림을 보내는 핵심 함수 (시간 라이브러리 활용)
+# 🌐 런타임 서버별 상태 관리 딕셔너리
 # ---------------------------------------------------------
-async def schedule_next_harvest():
-    global current_mention_message, current_embed_message, timer_task
+# 구조: { guild_id: { "mention_msg": ..., "embed_msg": ..., "task": ... } }
+server_runtime = {}
+
+def get_server_runtime(guild_id_str):
+    if guild_id_str not in server_runtime:
+        server_runtime[guild_id_str] = {
+            "mention_msg": None,
+            "embed_msg": None,
+            "task": None
+        }
+    return server_runtime[guild_id_str]
+
+# ---------------------------------------------------------
+# 🐝 특정 서버의 15분 뒤 알림을 보내는 핵심 함수
+# ---------------------------------------------------------
+async def schedule_next_harvest(guild_id: int):
+    guild_id_str = str(guild_id)
+    runtime = get_server_runtime(guild_id_str)
 
     # 15분 대기 (15분 = 900초)
-    # 테스트하고 싶으실 때는 900 대신 10초(10) 등으로 줄여서 테스트해 보실 수 있습니다!
     await asyncio.sleep(900)
 
-    if target_channel_id is None:
+    # 저장된 설정에서 채널 ID 가져오기
+    if guild_id_str not in saved_configs or saved_configs[guild_id_str].get("channel_id") is None:
         return
 
-    channel = bot.get_channel(target_channel_id)
+    channel_id = saved_configs[guild_id_str]["channel_id"]
+    channel = bot.get_channel(channel_id)
+    
     if channel:
         # 혹시 남아있는 이전 메시지들 청소
-        if current_mention_message:
-            try: await current_mention_message.delete()
+        if runtime["mention_msg"]:
+            try: await runtime["mention_msg"].delete()
             except: pass
-            current_mention_message = None
+            runtime["mention_msg"] = None
 
-        if current_embed_message:
-            try: await current_embed_message.delete()
+        if runtime["embed_msg"]:
+            try: await runtime["embed_msg"].delete()
             except: pass
-            current_embed_message = None
+            runtime["embed_msg"] = None
 
-        mention_text = f"<@&{target_role_id}>" if target_role_id else "@everyone"
+        role_id = saved_configs[guild_id_str].get("role_id")
+        mention_text = f"<@&{role_id}>" if role_id else "@everyone"
 
         # [1] 🔔 멘션 전용 메시지 전송 (알림음용)
-        current_mention_message = await channel.send(content=f"🔔 {mention_text} 벌들이 꿀을 가득 모아왔어요!")
+        runtime["mention_msg"] = await channel.send(content=f"🔔 {mention_text} 벌들이 꿀을 가득 모아왔어요!")
 
         # [2] 🐝 채집 완료 버튼이 포함된 임베드 메시지 전송
         embed = discord.Embed(
@@ -96,26 +133,28 @@ async def schedule_next_harvest():
         embed.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3413/3413307.png")
         embed.set_footer(text="🐝 수확을 기다리는 중...")
 
-        current_embed_message = await channel.send(embed=embed, view=HoneyHarvestView())
+        runtime["embed_msg"] = await channel.send(embed=embed, view=HoneyHarvestView())
 
 # ---------------------------------------------------------
-# 채집 완료 버튼 UI (View 클래스 내부에서 시간 제어)
+# 채집 완료 버튼 UI (서버별 독립 제어)
 # ---------------------------------------------------------
 class HoneyHarvestView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🍯 채집 완료!", style=discord.ButtonStyle.green, custom_id="honey_harvest_btn")
+    @discord.ui.button(label="🍯 채집 완료!", style=discord.ButtonStyle.green, custom_id="honey_harvest_btn_multi")
     async def harvest_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        global current_mention_message, timer_task
+        guild_id = interaction.guild.id
+        guild_id_str = str(guild_id)
+        runtime = get_server_runtime(guild_id_str)
 
         # 1. 🔔 멘션 알림 메시지만 쏙 골라서 삭제
-        if current_mention_message:
+        if runtime["mention_msg"]:
             try:
-                await current_mention_message.delete()
+                await runtime["mention_msg"].delete()
             except Exception:
                 pass
-            current_mention_message = None
+            runtime["mention_msg"] = None
 
         # 2. 버튼 누른 유저에게 조용히 팝업 피드백 전달
         await interaction.response.send_message(
@@ -127,7 +166,6 @@ class HoneyHarvestView(discord.ui.View):
         button.disabled = True
         button.label = "🐝 꿀 모으는 중..."
 
-        # datetime 라이브러리로 현재 수확 완료된 시각 기록
         now = datetime.now(ZoneInfo("Asia/Seoul"))
         finish_time = now + timedelta(minutes=15)
         time_str = finish_time.strftime('%H시 %M분')
@@ -139,7 +177,7 @@ class HoneyHarvestView(discord.ui.View):
                 "🌸 **벌들이 다시 들판으로 나가 열심히 꿀을 모으고 있습니다...**\n"
                 f"⏱️ 예상 수확 시각: 약 **{time_str}** 경"
             ),
-            color=0xFFD700  # 노란색
+            color=0xFFD700
         )
         working_embed.set_footer(text="⏱️ 15분 타이머 작동 중...")
 
@@ -148,39 +186,55 @@ class HoneyHarvestView(discord.ui.View):
         except Exception:
             pass
 
-        # 4. 기존에 돌고 있던 타이머가 있다면 취소하고 새로 15분 대기 시작!
-        if timer_task and not timer_task.done():
-            timer_task.cancel()
+        # 4. 해당 서버의 기존 타이머 취소 후 새로 시작
+        if runtime["task"] and not runtime["task"].done():
+            runtime["task"].cancel()
         
-        timer_task = asyncio.create_task(schedule_next_harvest())
+        runtime["task"] = asyncio.create_task(schedule_next_harvest(guild_id))
 
 # ---------------------------------------------------------
-# 슬래시 명령어
+# 슬래시 명령어 (서버별 독립 설정 및 파일 저장)
 # ---------------------------------------------------------
 
 @bot.tree.command(name="채널설정", description="벌들이 꿀 알림을 보낼 채널을 지정합니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    global target_channel_id
-    target_channel_id = channel.id
-    await interaction.response.send_message(f"🍯 꿀 알림 채널이 {channel.mention}(으)로 설정되었습니다.", ephemeral=True)
+    guild_id_str = str(interaction.guild.id)
+    
+    if guild_id_str not in saved_configs:
+        saved_configs[guild_id_str] = {"channel_id": None, "role_id": None}
+    
+    saved_configs[guild_id_str]["channel_id"] = channel.id
+    save_configs(saved_configs) # JSON 파일에 즉시 저장
+    
+    await interaction.response.send_message(f"🍯 꿀 알림 채널이 {channel.mention}(으)로 설정되었습니다. (설정 저장됨)", ephemeral=True)
 
 @bot.tree.command(name="역할설정", description="알림 시 멘션할 역할(양봉업자)을 지정합니다. (비워두면 @everyone)")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_role(interaction: discord.Interaction, role: discord.Role = None):
-    global target_role_id
+    guild_id_str = str(interaction.guild.id)
+    
+    if guild_id_str not in saved_configs:
+        saved_configs[guild_id_str] = {"channel_id": None, "role_id": None}
+
     if role is None:
-        target_role_id = None
-        await interaction.response.send_message("🍯 멘션 대상이 **@everyone**으로 설정되었습니다.", ephemeral=True)
+        saved_configs[guild_id_str]["role_id"] = None
+        save_configs(saved_configs)
+        await interaction.response.send_message("🍯 멘션 대상이 **@everyone**으로 설정되었습니다. (설정 저장됨)", ephemeral=True)
     else:
-        target_role_id = role.id
-        await interaction.response.send_message(f"🍯 멘션 대상이 {role.mention}(으)로 설정되었습니다.", ephemeral=True)
+        saved_configs[guild_id_str]["role_id"] = role.id
+        save_configs(saved_configs)
+        await interaction.response.send_message(f"🍯 멘션 대상이 {role.mention}(으)로 설정되었습니다. (설정 저장됨)", ephemeral=True)
 
 @bot.tree.command(name="타이머시작", description="벌들을 들판으로 보내 15분 꿀 모으기 타이머를 시작합니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def start_timer(interaction: discord.Interaction):
-    global current_mention_message, timer_task
-    if target_channel_id is None:
+    guild_id = interaction.guild.id
+    guild_id_str = str(guild_id)
+    runtime = get_server_runtime(guild_id_str)
+
+    # 설정된 채널이 있는지 확인
+    if guild_id_str not in saved_configs or saved_configs[guild_id_str].get("channel_id") is None:
         await interaction.response.send_message("⚠️ 먼저 `/채널설정` 명령어로 꿀 알림을 받을 채널을 선택해 주세요.", ephemeral=True)
         return
 
@@ -195,33 +249,34 @@ async def start_timer(interaction: discord.Interaction):
     )
     status_embed.set_footer(text="⏱️ 15분 타이머 작동 중...")
 
-    if current_mention_message:
-        try: await current_mention_message.delete()
+    if runtime["mention_msg"]:
+        try: await runtime["mention_msg"].delete()
         except: pass
-        current_mention_message = None
+        runtime["mention_msg"] = None
 
     # 기존 타이머 취소 후 새로 시작
-    if timer_task and not timer_task.done():
-        timer_task.cancel()
+    if runtime["task"] and not runtime["task"].done():
+        runtime["task"].cancel()
     
-    timer_task = asyncio.create_task(schedule_next_harvest())
+    runtime["task"] = asyncio.create_task(schedule_next_harvest(guild_id))
     
     await interaction.response.send_message(embed=status_embed, ephemeral=True)
 
 @bot.tree.command(name="타이머중지", description="벌들의 꿀 모으기를 중지하고 쉬게 합니다.")
 @app_commands.checks.has_permissions(administrator=True)
 async def stop_timer(interaction: discord.Interaction):
-    global timer_task
-    if timer_task and not timer_task.done():
-        timer_task.cancel()
-        await interaction.response.send_message("🛑 벌들이 꿀 모으기를 멈추고 벌집으로 돌아왔습니다.", ephemeral=True)
+    guild_id_str = str(interaction.guild.id)
+    runtime = get_server_runtime(guild_id_str)
+    
+    if runtime["task"] and not runtime["task"].done():
+        runtime["task"].cancel()
+        await interaction.response.send_message("🛑 이 서버의 벌들이 꿀 모으기를 멈추고 벌집으로 돌아왔습니다.", ephemeral=True)
     else:
-        await interaction.response.send_message("⚠️ 현재 실행 중인 타이머가 없습니다.", ephemeral=True)
+        await interaction.response.send_message("⚠️ 현재 이 서버에서 실행 중인 타이머가 없습니다.", ephemeral=True)
 
 # ---------------------------------------------------------
 # 프로그램 실행 진입점
 # ---------------------------------------------------------
 if __name__ == '__main__':
     keep_alive()
-    TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
     bot.run(TOKEN)
