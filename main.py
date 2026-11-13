@@ -157,10 +157,7 @@ class HoneyHarvestView(discord.ui.View):
             runtime["mention_msg"] = None
 
         # 버튼 누른 유저에게 조용히 팝업 피드백 전달 (채팅 API 대신 interaction 응답 활용으로 부하 감소)
-        await interaction.response.send_message(
-            f"🐝 {interaction.user.display_name}님이 꿀을 수확했습니다! 벌들이 다시 꿀을 모으러 출동합니다.",
-            ephemeral=True
-        )
+        await interaction.response.defer()
 
         # 임베드 메시지는 지우지 않고 수정(edit)만 하여 API 호출 횟수를 최소화합니다.
         button.disabled = True
