@@ -67,13 +67,11 @@ def save_configs(data):
     except Exception as e:
         print(f"설정 저장 중 에러 발생: {e}")
 
-# 전체 서버 설정 데이터 로드 (형식: { "guild_id": { "channel_id": ..., "role_id": ... } })
 saved_configs = load_configs()
 
 # ---------------------------------------------------------
 # 🌐 런타임 서버별 상태 관리 딕셔너리
 # ---------------------------------------------------------
-# 구조: { guild_id: { "mention_msg": ..., "embed_msg": ..., "task": ... } }
 server_runtime = {}
 
 def get_server_runtime(guild_id_str):
@@ -95,7 +93,6 @@ async def schedule_next_harvest(guild_id: int):
     # 15분 대기 (15분 = 900초)
     await asyncio.sleep(900)
 
-    # 저장된 설정에서 채널 ID 가져오기
     if guild_id_str not in saved_configs or saved_configs[guild_id_str].get("channel_id") is None:
         return
 
@@ -103,7 +100,9 @@ async def schedule_next_harvest(guild_id: int):
     channel = bot.get_channel(channel_id)
     
     if channel:
-        # 혹시 남아있는 이전 메시지들 청소
+        # 🛡️ [429 에러 방지 안전장치 1]
+        # 무작위 채널 스캔이나 전체 삭제를 하지 않고,
+        # 정확히 추적되고 있는 이전 멘션 메시지만 1번 안전하게 삭제하여 API 요청 폭발을 막습니다.
         if runtime["mention_msg"]:
             try: await runtime["mention_msg"].delete()
             except: pass
@@ -142,13 +141,14 @@ class HoneyHarvestView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🍯 채집 완료!", style=discord.ButtonStyle.green, custom_id="honey_harvest_btn_multi")
+    @discord.ui.button(label="🍯 채집 완료!", style=discord.ButtonStyle.green, custom_id="honey_harvest_btn_clean")
     async def harvest_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild_id = interaction.guild.id
         guild_id_str = str(guild_id)
         runtime = get_server_runtime(guild_id_str)
 
-        # 1. 🔔 멘션 알림 메시지만 쏙 골라서 삭제
+        # 🛡️ [429 에러 방지 안전장치 2]
+        # 유저가 버튼을 연타하더라도 이미 삭제된 메시지라면 재요청하지 않고 안전하게 예외 처리합니다.
         if runtime["mention_msg"]:
             try:
                 await runtime["mention_msg"].delete()
@@ -156,13 +156,13 @@ class HoneyHarvestView(discord.ui.View):
                 pass
             runtime["mention_msg"] = None
 
-        # 2. 버튼 누른 유저에게 조용히 팝업 피드백 전달
+        # 버튼 누른 유저에게 조용히 팝업 피드백 전달 (채팅 API 대신 interaction 응답 활용으로 부하 감소)
         await interaction.response.send_message(
             f"🐝 {interaction.user.display_name}님이 꿀을 수확했습니다! 벌들이 다시 꿀을 모으러 출동합니다.",
             ephemeral=True
         )
 
-        # 3. 임베드 메시지는 지우지 않고 "꿀 모으는 중..." 상태로 수정 & 버튼 비활성화
+        # 임베드 메시지는 지우지 않고 수정(edit)만 하여 API 호출 횟수를 최소화합니다.
         button.disabled = True
         button.label = "🐝 꿀 모으는 중..."
 
@@ -175,7 +175,7 @@ class HoneyHarvestView(discord.ui.View):
             description=(
                 f"**{interaction.user.display_name}** 님이 꿀 수확을 완료했습니다!\n\n"
                 "🌸 **벌들이 다시 들판으로 나가 열심히 꿀을 모으고 있습니다...**\n"
-                f"⏱️ 예상 수확 시각: 약 **{time_str}** 경"
+                f"⏱️ 예상 수확 시각: 약 **{time_str}** 경 (KST)"
             ),
             color=0xFFD700
         )
@@ -186,7 +186,9 @@ class HoneyHarvestView(discord.ui.View):
         except Exception:
             pass
 
-        # 4. 해당 서버의 기존 타이머 취소 후 새로 시작
+        # 🛡️ [429 에러 방지 안전장치 3]
+        # 기존에 돌고 있던 타이머 태스크가 중복으로 쌓이지 않도록,
+        # 새로운 타이머를 만들기 전에 기존 태스크를 반드시 취소(cancel)하여 스팸 누적을 방지합니다.
         if runtime["task"] and not runtime["task"].done():
             runtime["task"].cancel()
         
@@ -233,7 +235,6 @@ async def start_timer(interaction: discord.Interaction):
     guild_id_str = str(guild_id)
     runtime = get_server_runtime(guild_id_str)
 
-    # 설정된 채널이 있는지 확인
     if guild_id_str not in saved_configs or saved_configs[guild_id_str].get("channel_id") is None:
         await interaction.response.send_message("⚠️ 먼저 `/채널설정` 명령어로 꿀 알림을 받을 채널을 선택해 주세요.", ephemeral=True)
         return
@@ -244,7 +245,7 @@ async def start_timer(interaction: discord.Interaction):
 
     status_embed = discord.Embed(
         title="🐝 벌들이 꿀을 모으기 시작했습니다!",
-        description=f"🌸 **벌들이 들판으로 나가 열심히 꿀을 모으고 있습니다...**\n⏱️ 예상 수확 시각: 약 **{time_str}** 경",
+        description=f"🌸 **벌들이 들판으로 나가 열심히 꿀을 모으고 있습니다...**\n⏱️ 예상 수확 시각: 약 **{time_str}** 경 (KST)",
         color=0xFFD700
     )
     status_embed.set_footer(text="⏱️ 15분 타이머 작동 중...")
@@ -254,7 +255,8 @@ async def start_timer(interaction: discord.Interaction):
         except: pass
         runtime["mention_msg"] = None
 
-    # 기존 타이머 취소 후 새로 시작
+    # 🛡️ [429 에러 방지 안전장치 3 (명령어 버전)]
+    # 수동으로 `/타이머시작`을 다시 누를 때도 기존 태스크가 겹치지 않게 취소합니다.
     if runtime["task"] and not runtime["task"].done():
         runtime["task"].cancel()
     
