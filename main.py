@@ -33,8 +33,7 @@ def keep_alive():
 # ---------------------------------------------------------
 # 2. 디스코드 봇 설정
 # ---------------------------------------------------------
-intents = discord.Intents.default()
-intents.message_content = True
+intents = discord.Intents.all()
 
 class MyBot(commands.Bot):
     def __init__(self):
